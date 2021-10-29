@@ -494,41 +494,47 @@ fetchIterator ::
   -> state
   -> SQLHSTMT s
   -> IO state
-fetchIterator dbc (UnliftIO runInIO) step state0 stmt = do
-  SQLSMALLINT cols <-
-    liftIO
-      (withMalloc
-         (\sizep -> do
-            assertSuccess
-              dbc
-              "odbc_SQLNumResultCols"
-              (odbc_SQLNumResultCols stmt sizep)
-            peek sizep))
-  types <- mapM (describeColumn dbc stmt) [1 .. cols]
-  let loop state = do
-        do retcode0 <- odbc_SQLFetch dbc stmt
-           if | retcode0 == sql_no_data ->
-                do retcode <- odbc_SQLMoreResults dbc stmt
-                   if retcode == sql_success || retcode == sql_success_with_info
-                     then loop state
-                     else pure state
-              | retcode0 == sql_success || retcode0 == sql_success_with_info ->
-                do row <-
-                     sequence
-                       (zipWith (getData dbc stmt) [SQLUSMALLINT 1 ..] types)
-                   !state' <- runInIO (step state row)
-                   case state' of
-                     Stop state'' -> pure state''
-                     Continue state'' -> loop state''
-              | otherwise ->
-                throwIO
-                  (UnsuccessfulReturnCode
-                     "odbc_SQLFetch"
-                     (coerce retcode0)
-                     "Unexpected return code")
-  if cols > 0
-    then loop state0
-    else pure state0
+fetchIterator dbc (UnliftIO runInIO) step state0 stmt =
+  loop state0
+  where
+    loop state = do
+      SQLSMALLINT cols <-
+        liftIO
+          (withMalloc
+             (\sizep -> do
+                assertSuccess
+                  dbc
+                  "odbc_SQLNumResultCols"
+                  (odbc_SQLNumResultCols stmt sizep)
+                peek sizep))
+      if cols == 0
+        then
+          do retcode <- odbc_SQLMoreResults dbc stmt
+             if retcode == sql_success || retcode == sql_success_with_info
+               then loop state
+               else pure state
+        else
+          do types <- mapM (describeColumn dbc stmt) [1 .. cols]
+             retcode0 <- odbc_SQLFetch dbc stmt
+             if | retcode0 == sql_no_data ->
+                  do retcode <- odbc_SQLMoreResults dbc stmt
+                     if retcode == sql_success || retcode == sql_success_with_info
+                       then loop state
+                       else pure state
+                | retcode0 == sql_success || retcode0 == sql_success_with_info ->
+                  do row <-
+                       sequence
+                         (zipWith (getData dbc stmt) [SQLUSMALLINT 1 ..] types)
+                     !state' <- runInIO (step state row)
+                     case state' of
+                       Stop state'' -> pure state''
+                       Continue state'' -> loop state''
+                | otherwise ->
+                  throwIO
+                    (UnsuccessfulReturnCode
+                       "odbc_SQLFetch"
+                       (coerce retcode0)
+                       "Unexpected return code")
 
 -- | Fetch all results from possible multiple statements.
 fetchAllResults :: Ptr EnvAndDbc -> SQLHSTMT s -> IO ()
@@ -545,36 +551,42 @@ fetchAllResults dbc stmt = do
 -- | Fetch all rows from a statement.
 fetchStatementRows :: Ptr EnvAndDbc -> SQLHSTMT s -> IO [[(Column,Value)]]
 fetchStatementRows dbc stmt = do
-  SQLSMALLINT cols <-
-    withMalloc
-      (\sizep -> do
-         assertSuccess
-           dbc
-           "odbc_SQLNumResultCols"
-           (odbc_SQLNumResultCols stmt sizep)
-         peek sizep)
-  types <- mapM (describeColumn dbc stmt) [1 .. cols]
-  let loop rows = do
-        do retcode0 <- odbc_SQLFetch dbc stmt
-           if | retcode0 == sql_no_data ->
-                do retcode <- odbc_SQLMoreResults dbc stmt
-                   if retcode == sql_success || retcode == sql_success_with_info
-                     then loop rows
-                     else pure (rows [])
-              | retcode0 == sql_success || retcode0 == sql_success_with_info ->
-                do fields <-
-                     sequence
-                       (zipWith (getData dbc stmt) [SQLUSMALLINT 1 ..] types)
-                   loop (rows . (fields :))
-              | otherwise ->
-                throwIO
-                  (UnsuccessfulReturnCode
-                     "odbc_SQLFetch"
-                     (coerce retcode0)
-                     "Unexpected return code")
-  if cols > 0
-    then loop id
-    else pure []
+  loop id
+  where
+    loop rows =
+      do SQLSMALLINT cols <-
+           withMalloc
+             (\sizep -> do
+                assertSuccess
+                  dbc
+                  "odbc_SQLNumResultCols"
+                  (odbc_SQLNumResultCols stmt sizep)
+                peek sizep)
+         if cols == 0
+           then
+             do retcode <- odbc_SQLMoreResults dbc stmt
+                if retcode == sql_success || retcode == sql_success_with_info
+                  then loop rows
+                  else pure (rows [])
+           else
+             do types <- mapM (describeColumn dbc stmt) [1 .. cols]
+                retcode0 <- odbc_SQLFetch dbc stmt
+                if | retcode0 == sql_no_data ->
+                     do retcode <- odbc_SQLMoreResults dbc stmt
+                        if retcode == sql_success || retcode == sql_success_with_info
+                          then loop rows
+                          else pure (rows [])
+                   | retcode0 == sql_success || retcode0 == sql_success_with_info ->
+                     do fields <-
+                          sequence
+                            (zipWith (getData dbc stmt) [SQLUSMALLINT 1 ..] types)
+                        loop (rows . (fields :))
+                   | otherwise ->
+                     throwIO
+                       (UnsuccessfulReturnCode
+                          "odbc_SQLFetch"
+                          (coerce retcode0)
+                          "Unexpected return code")
 
 -- | Describe the given column by its integer index.
 describeColumn :: Ptr EnvAndDbc -> SQLHSTMT s -> Int16 -> IO Column
